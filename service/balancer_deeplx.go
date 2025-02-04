@@ -49,7 +49,7 @@ func NewLoadBalancer(vlist *[]string) TranslateService {
 	})
 	lb := &LoadBalancer{
 		Servers:            servers,
-		client:             req.NewClient().SetTimeout(2 * time.Second),
+		client:             req.NewClient().SetTimeout(3 * time.Second),
 		unavailableServers: make([]*Server, 0),
 		healthCheck:        time.NewTicker(healthCheckInterval),
 	}
@@ -109,49 +109,57 @@ func (lb *LoadBalancer) GetTranslateData(trReq domain.TranslateRequest) domain.T
 }
 
 func (lb *LoadBalancer) sendRequest(trReq domain.TranslateRequest) domain.TranslateResponse {
-	ctx, cancelFunc := context.WithTimeout(context.Background(), time.Second*5)
-	defer cancelFunc()
-	resultChan := make(chan domain.TranslateResponse, 1)
+    maxRetries := 3
+    for retry := 0; retry < maxRetries; retry++ {
+        ctx, cancelFunc := context.WithTimeout(context.Background(), time.Second*5)
+        defer cancelFunc()
+        resultChan := make(chan domain.TranslateResponse, 1)
 
-	contextPool := pool.New().WithContext(ctx).WithMaxGoroutines(min(len(lb.Servers), 5))
-	for i := 0; i < 5; i++ {
-		contextPool.Go(func(ctx context.Context) error {
-			server := lb.getServer()
-			var trResult domain.TranslateResponse
-			response, err := lb.client.R().
-				SetContext(ctx).
-				SetBody(trReq).
-				SetSuccessResult(&trResult).
-				Post(server.URL)
+        contextPool := pool.New().WithContext(ctx).WithMaxGoroutines(min(len(lb.Servers), 5))
+        for i := 0; i < 5; i++ {
+            contextPool.Go(func(ctx context.Context) error {
+                server := lb.getServer()
+                var trResult domain.TranslateResponse
+                response, err := lb.client.R().
+                    SetContext(ctx).
+                    SetBody(trReq).
+                    SetSuccessResult(&trResult).
+                    Post(server.URL)
 
-			if err != nil {
-				return err
-			}
-			response.Body.Close()
+                if err != nil {
+                    return err
+                }
+                response.Body.Close()
 
-			if trResult.Code == 200 && len(trResult.Data) > 0 {
-				select {
-				case resultChan <- trResult:
-					cancelFunc()
-				case <-ctx.Done():
-					return nil
-				default:
-				}
-			} else {
-				server.isAvailable = false
-				lb.unavailableServers = append(lb.unavailableServers, server)
-			}
-			return nil
-		})
-	}
+                if trResult.Code == 200 && len(trResult.Data) > 0 {
+                    select {
+                    case resultChan <- trResult:
+                        cancelFunc()
+                    case <-ctx.Done():
+                        return nil
+                    default:
+                    }
+                } else {
+                    server.isAvailable = false
+                    lb.unavailableServers = append(lb.unavailableServers, server)
+                }
+                return nil
+            })
+        }
 
-	select {
-	case result := <-resultChan:
-		return result
-	case <-ctx.Done():
-		return domain.TranslateResponse{}
-	}
+        select {
+        case result := <-resultChan:
+            return result
+        case <-ctx.Done():
+            // 如果所有请求都失败，继续重试
+            continue
+        }
+    }
+
+    // 如果所有重试都失败，返回空响应
+    return domain.TranslateResponse{}
 }
+
 
 func (lb *LoadBalancer) getServer() *Server {
 	index := atomic.AddUint32(&lb.index, 1) - 1

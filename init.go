@@ -8,9 +8,6 @@ import (
 	"deeplx-local/service"
 	"errors"
 	"fmt"
-	"github.com/imroc/req/v3"
-	lop "github.com/samber/lo/parallel"
-	"github.com/sourcegraph/conc/pool"
 	"log"
 	"net/http"
 	"os"
@@ -21,16 +18,59 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"math/rand"
+
+	"github.com/imroc/req/v3"
+	lop "github.com/samber/lo/parallel"
+	"github.com/sourcegraph/conc/pool"
+	"gopkg.in/yaml.v3"
 )
 
+type Config struct {
+    HunterKey string `yaml:"hunter_api_key"`
+    QuakeKey  string `yaml:"360_api_key"`
+    RoutePath string `yaml:"route"`
+}
+
+func loadConfig() Config {
+    var config Config
+    
+    // 尝试读取配置文件
+    data, err := os.ReadFile("config.yaml")
+    if err == nil {
+        err = yaml.Unmarshal(data, &config)
+        if err != nil {
+            log.Printf("解析配置文件失败: %v\n", err)
+        }
+    }
+
+    // 如果环境变量存在，则覆盖配置文件中的值
+    if envHunterKey := os.Getenv("hunter_api_key"); envHunterKey != "" {
+        config.HunterKey = envHunterKey
+    }
+    if envQuakeKey := os.Getenv("360_api_key"); envQuakeKey != "" {
+        config.QuakeKey = envQuakeKey
+    }
+    if envRoutePath := os.Getenv("route"); envRoutePath != "" {
+        config.RoutePath = envRoutePath
+    }
+
+    return config
+}
+
+// 先声明 config 变量
+var config = loadConfig()
+
 var (
-	urlPath     = "url.txt"
-	client      = req.NewClient().SetTimeout(3 * time.Second)
-	hunterKey   = os.Getenv("hunter_api_key")
-	quakeKey    = os.Getenv("360_api_key")
-	routePath   = os.Getenv("route")
-	scanService service.ScanService
+	urlPath        = "url.txt"
+	urlSuccessPath = "url_success.txt"
+	client         = req.NewClient().SetTimeout(5 * time.Second)
+    hunterKey      = config.HunterKey
+    quakeKey       = config.QuakeKey
+    routePath      = config.RoutePath
+	scanService    service.ScanService
 )
+
 
 // readFile
 func readFile(filename string) ([]byte, error) {
@@ -83,10 +123,11 @@ func getValidURLs() []string {
 	validChan := make(chan string, len(urls))
 
 	// 并发检查URL可用性
-	p := pool.New().WithMaxGoroutines(30)
+	p := pool.New().WithMaxGoroutines(24)
 	for _, url := range urls {
 		url := url // 创建一个新的变量，避免闭包中的变量复用
 		p.Go(func() {
+			time.Sleep(time.Duration(rand.Intn(300)) * time.Millisecond)
 			if availability, err := pkg.CheckURLAvailability(client, url); err == nil && availability {
 				validChan <- url
 			}
@@ -105,6 +146,10 @@ func getValidURLs() []string {
 	if len(validList) == 0 {
 		log.Fatalln("available urls is empty")
 	}
+
+	// 将可用的URL写入到url_success.txt
+	writeFileReplace(urlSuccessPath, validList)
+
 	return validList
 }
 
