@@ -11,9 +11,19 @@ import (
 )
 
 func main() {
-	initServer() // 初始化服务
-	autoScan()   // 自动扫描
-	exitV1()     // 监听退出
+	// 初始化托盘
+	if err := initTray(); err != nil {
+		log.Fatal(err)
+	}
+
+	// 启动服务
+	go func() {
+		initServer() // 初始化服务
+		autoScan()   // 自动扫描
+		exitV1()     // 监听退出
+	}()
+
+	// 保持主线程运行
 	select {}
 }
 
