@@ -16,18 +16,42 @@ import (
 var (
 	consoleWindow windows.Handle // 保存控制台窗口句柄
 	logBuffer     bytes.Buffer  // 用于缓存日志
+	logFile       *os.File        // 添加日志文件句柄
+	logChan       = make(chan string, 1000) // 用于异步写入日志
 )
 
 //go:embed icon.ico
 var iconBytes []byte
 
 func init() {
-	// 设置日志同时输出到文件和缓存
-	logFile, err := os.OpenFile("deeplx.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+	var err error
+	// 打开日志文件
+	logFile, err = os.OpenFile("deeplx.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
 	if err == nil {
-		// 确保同时写入到文件和缓存
-		multiWriter := io.MultiWriter(logFile, &logBuffer)
-		log.SetOutput(multiWriter)
+		// 启动异步日志处理
+		go handleLogs()
+		
+		// 设置日志输出
+		log.SetOutput(io.MultiWriter(&logBuffer, &logWriter{}, logFile))
+	}
+}
+
+// 添加自定义 logWriter
+type logWriter struct{}
+
+func (w *logWriter) Write(p []byte) (n int, err error) {
+	logChan <- string(p)
+	return len(p), nil
+}
+
+// 添加异步日志处理函数
+func handleLogs() {
+	for msg := range logChan {
+		if logFile != nil {
+			logFile.WriteString(msg)
+		}
+		logBuffer.WriteString(msg)
+		fmt.Print(msg) // 输出到标准输出
 	}
 }
 
@@ -77,13 +101,15 @@ func onReady() {
 							log.Println("分配控制台失败")
 							return
 						}
-						// 重定向标准输出和标准错误到新控制台
-						file, err := os.OpenFile("CONOUT$", os.O_RDWR, 0)
+						
+						// 重定向标准输出和标准错误到新控制台，同时保持文件输出
+						consoleOut, err := os.OpenFile("CONOUT$", os.O_RDWR, 0)
 						if err == nil {
-							os.Stdout = file
-							os.Stderr = file
-							// 重新设置日志输出
-							log.SetOutput(io.MultiWriter(file, &logBuffer))
+							// 创建多重输出，同时写入到控制台、文件和缓存
+							multiWriter := io.MultiWriter(consoleOut, logFile, &logBuffer)
+							log.SetOutput(multiWriter)
+							os.Stdout = consoleOut
+							os.Stderr = consoleOut
 						}
 					}
 					
@@ -94,8 +120,8 @@ func onReady() {
 						ShowWindow(console, SW_SHOW)
 						SetForegroundWindow(console)
 						
-						// 输出缓存的日志
-						fmt.Print(logBuffer.String())
+						// 输出缓存的日志到控制台
+						fmt.Fprint(os.Stdout, logBuffer.String())
 					} else {
 						log.Println("错误: 无法获取控制台窗口句柄")
 					}
@@ -110,6 +136,9 @@ func onReady() {
 }
 
 func onExit() {
+	if logFile != nil {
+		logFile.Close()
+	}
 	os.Exit(0)
 }
 
@@ -131,40 +160,48 @@ func openBrowser(url string) {
 	}
 }
 
-// 添加新的控制台相关函数
+// 修改 hideConsole 函数
 func hideConsole() {
 	if runtime.GOOS == "windows" {
 		console := GetConsoleWindow()
 		if console != 0 {
 			log.Printf("隐藏控制台窗口，句柄: %v\n", console)
-			consoleWindow = console // 保存窗口句柄
-			
-			// 在隐藏之前确保日志输出被正确重定向
-			if logFile, err := os.OpenFile("deeplx.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666); err == nil {
-				multiWriter := io.MultiWriter(logFile, &logBuffer)
-				log.SetOutput(multiWriter)
-			}
-			
+			consoleWindow = console
 			ShowWindow(console, SW_HIDE)
-		} else {
-			log.Println("警告: 获取控制台窗口句柄失败")
 		}
 	}
 }
 
+// 修改显示控制台的处理逻辑
 func showConsole() {
 	if runtime.GOOS == "windows" {
 		if consoleWindow == 0 {
-			log.Println("错误: 无效的控制台窗口句柄")
-			return
+			if !AllocConsole() {
+				log.Println("分配控制台失败")
+				return
+			}
+			
+			// 获取新的控制台窗口句柄
+			consoleWindow = GetConsoleWindow()
+			if consoleWindow == 0 {
+				log.Println("获取控制台窗口句柄失败")
+				return
+			}
+			
+			// 重定向标准输出
+			stdout, err := os.OpenFile("CONOUT$", os.O_WRONLY, 0)
+			if err == nil {
+				os.Stdout = stdout
+				os.Stderr = stdout
+				
+				// 输出已缓存的日志
+				fmt.Fprint(stdout, logBuffer.String())
+			}
 		}
+		
 		log.Printf("显示控制台窗口，句柄: %v\n", consoleWindow)
-		if !ShowWindow(consoleWindow, SW_SHOW) {
-			log.Println("ShowWindow 调用失败")
-		}
-		if !SetForegroundWindow(consoleWindow) {
-			log.Println("SetForegroundWindow 调用失败")
-		}
+		ShowWindow(consoleWindow, SW_SHOW)
+		SetForegroundWindow(consoleWindow)
 	}
 }
 
